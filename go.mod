@@ -1,4 +1,4 @@
-module github.com/ndzn/lastfmwebsocket
+module github.com/ndzn/lastfm-websocket
 
 go 1.20
 

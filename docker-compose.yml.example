@@ -1,0 +1,12 @@
+version: "3.5"
+
+services:
+    fm:
+        build: .
+        restart: unless-stopped
+        container_name: fm
+        ports:
+            - "3621:3621"
+        environment:
+            - LASTFM_API_KEY=your_lastfm_api_key_here
+            - PORT=3621

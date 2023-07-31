@@ -19,7 +19,9 @@ ws://localhost:3621/fm/USERNAME
 }
 ```
 
-> #### This soulution polls LastFM every 2 seconds for an update. LastFM isnt exactly specific on their hard [rate limits](https://www.last.fm/api/intro) but it _should_ be fine for personal use.
+The response will default to return the current played song or the most last played song if the user is not currently playing anything. This will be indicated by the `is_now_playing` field defaulting to true if the user is currently playing something.
+
+> #### This solution polls LastFM every 2 seconds for an update. LastFM isnt exactly specific on their hard [rate limits](https://www.last.fm/api/intro) but it _should_ be fine for personal use.
 
 ## Running
 ### Docker

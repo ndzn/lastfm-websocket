@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"time"
 
@@ -38,7 +39,15 @@ func main() {
 	}
 
 	http.HandleFunc("/fm/", handleWebSocket)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+    c := make(chan os.Signal, 1)
+    signal.Notify(c, os.Interrupt)
+    go func() {
+        <-c
+        log.Println("Shutting down gracefully...")
+        os.Exit(0)
+    }()
+
+    log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -79,15 +88,15 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// send data over websocket when needed
-	for data := range dataCh {
-		message, _ := json.Marshal(data)
-		if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
-			log.Println(err)
-			break
-		}
-	}
+    // send data over websocket when needed
+    for data := range dataCh {
+        message, _ := json.Marshal(data)
+        if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
+            log.Println("Error writing to WebSocket (Websocket probably closed):", err)
+        }
+    }
 }
+
 
 // helper function to get most recent track or most recent scrobble
 func getLastPlayedTrack(username string) (*Message, error) {

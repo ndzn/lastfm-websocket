@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Last.fm Now Playing</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #121212; color: #fff;
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh;
+  }
+  .container { text-align: center; max-width: 420px; width: 100%; padding: 20px; }
+  h1 { font-size: 1.2rem; color: #b3b3b3; margin-bottom: 24px; }
+  #connect-form { margin-bottom: 24px; display: flex; gap: 8px; justify-content: center; }
+  #connect-form input {
+    padding: 10px 14px; border-radius: 8px; border: 1px solid #333;
+    background: #1e1e1e; color: #fff; font-size: 1rem; width: 200px;
+  }
+  #connect-form button {
+    padding: 10px 18px; border-radius: 8px; border: none;
+    background: #1db954; color: #fff; font-size: 1rem; cursor: pointer;
+    font-weight: 600;
+  }
+  #connect-form button:hover { background: #1ed760; }
+  .player { display: none; margin-top: 12px; }
+  .player.active { display: block; }
+  .album-art {
+    width: 200px; height: 200px; border-radius: 12px;
+    margin: 0 auto 16px; background: #282828;
+    overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,.5);
+  }
+  .album-art img { width: 100%; height: 100%; object-fit: cover; }
+  .track-name { font-size: 1.3rem; font-weight: 700; margin-bottom: 4px; }
+  .track-name a { color: #fff; text-decoration: none; }
+  .track-name a:hover { text-decoration: underline; }
+  .artist-name { font-size: 1rem; color: #b3b3b3; }
+  .badge {
+    display: inline-block; margin-top: 12px; padding: 4px 12px;
+    border-radius: 12px; font-size: .75rem; font-weight: 600;
+  }
+  .badge.playing { background: #1db954; color: #fff; }
+  .badge.scrobbled { background: #333; color: #b3b3b3; }
+  .status { margin-top: 16px; font-size: .8rem; color: #666; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Last.fm Now Playing</h1>
+  <form id="connect-form">
+    <input type="text" id="username" placeholder="Last.fm username" required>
+    <button type="submit">Connect</button>
+  </form>
+  <div class="player" id="player">
+    <div class="album-art"><img id="art" src="" alt="Album Art"></div>
+    <div class="track-name"><a id="track" href="#" target="_blank"></a></div>
+    <div class="artist-name" id="artist"></div>
+    <span class="badge" id="badge"></span>
+  </div>
+  <div class="status" id="status"></div>
+</div>
+<script>
+// Last.fm WebSocket example client
+//
+// Usage: Open this file in a browser and enter a Last.fm username.
+// The page connects to ws://localhost:3621/fm/USERNAME and displays
+// real-time track information. Change WS_BASE below if your server
+// is hosted elsewhere.
+(function () {
+  var WS_BASE = "ws://localhost:3621";
+  var ws, reconnectTimer, username;
+  var form = document.getElementById("connect-form");
+  var status = document.getElementById("status");
+  var player = document.getElementById("player");
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    username = document.getElementById("username").value.trim();
+    if (!username) return;
+    connect();
+  });
+
+  function connect() {
+    if (ws) { ws.onclose = null; ws.close(); }
+    var url = WS_BASE + "/fm/" + encodeURIComponent(username);
+    status.textContent = "Connecting…";
+    ws = new WebSocket(url);
+
+    ws.onopen = function () { status.textContent = "Connected"; };
+
+    ws.onmessage = function (evt) {
+      try {
+        var d = JSON.parse(evt.data);
+        document.getElementById("art").src = d.image_url || "";
+        document.getElementById("track").textContent = d.track;
+        document.getElementById("track").href = d.track_url || "#";
+        document.getElementById("artist").textContent = d.artist;
+        var badge = document.getElementById("badge");
+        badge.textContent = d.is_now_playing ? "Now Playing" : "Last Played";
+        badge.className = "badge " + (d.is_now_playing ? "playing" : "scrobbled");
+        player.classList.add("active");
+      } catch (e) { console.error("Parse error", e); }
+    };
+
+    ws.onclose = function () {
+      status.textContent = "Disconnected – reconnecting in 3s…";
+      reconnectTimer = setTimeout(connect, 3000);
+    };
+
+    ws.onerror = function () { ws.close(); };
+  }
+})();
+</script>
+</body>
+</html>

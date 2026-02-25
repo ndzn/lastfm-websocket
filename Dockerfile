@@ -8,11 +8,13 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -o main .
 
-FROM alpine:latest
+FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates && \
+    adduser -D -u 10001 appuser
 COPY --from=builder /app/main /main
 
+USER appuser
 EXPOSE 3621
 
 CMD ["/main"]

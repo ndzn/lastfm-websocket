@@ -35,14 +35,23 @@ Connect a WebSocket client to:
 ws://localhost:3621/fm/USERNAME
 ```
 
-### Docker
+### Docker (pre-built image)
+
+A pre-built image is published to GitHub Container Registry on every push to `main` and on version tags.
+
+```bash
+docker pull ghcr.io/ndzn/lastfm-websocket:main
+docker run -p 3621:3621 -e LASTFM_API_KEY=your_key_here ghcr.io/ndzn/lastfm-websocket:main
+```
+
+Or use Docker Compose – see `docker-compose.yml.example`.
+
+### Docker (build locally)
 
 ```bash
 docker build -t lastfm-websocket .
 docker run -p 3621:3621 -e LASTFM_API_KEY=your_key_here lastfm-websocket
 ```
-
-Or use Docker Compose – see `docker-compose.yml.example`.
 
 ## WebSocket API
 

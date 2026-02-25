@@ -85,9 +85,21 @@ Replace `USERNAME` with any Last.fm username (alphanumeric, hyphens, underscores
   var ws = new WebSocket("ws://your-server:3621/fm/YOUR_USERNAME");
   ws.onmessage = function (event) {
     var track = JSON.parse(event.data);
-    document.getElementById("now-playing").innerHTML =
-      '<img src="' + track.image_url + '" width="100">' +
-      '<p><strong>' + track.track + '</strong> by ' + track.artist + '</p>';
+    var container = document.getElementById("now-playing");
+    container.innerHTML = "";
+
+    var img = document.createElement("img");
+    img.src = track.image_url;
+    img.width = 100;
+
+    var p = document.createElement("p");
+    var strong = document.createElement("strong");
+    strong.textContent = track.track;
+    p.appendChild(strong);
+    p.appendChild(document.createTextNode(" by " + track.artist));
+
+    container.appendChild(img);
+    container.appendChild(p);
   };
 </script>
 ```

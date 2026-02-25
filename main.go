@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
@@ -108,6 +109,7 @@ func (h *Hub) subscribe(client *Client) error {
 		select {
 		case client.send <- poller.lastMessage:
 		default:
+			log.Printf("Initial cached message for user %q dropped: client send channel is full", client.username)
 		}
 	}
 	poller.mu.Unlock()
@@ -220,10 +222,7 @@ func (c *Client) readPump() {
 // writePump sends messages from the send channel and periodic pings.
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		c.conn.Close()
-	}()
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -290,6 +289,7 @@ func handleWebSocket(hub *Hub, upgrader websocket.Upgrader) http.HandlerFunc {
 			http.Error(w, "Invalid username", http.StatusBadRequest)
 			return
 		}
+		username = strings.ToLower(username)
 
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -309,6 +309,7 @@ func handleWebSocket(hub *Hub, upgrader websocket.Upgrader) http.HandlerFunc {
 			conn.WriteMessage(websocket.CloseMessage,
 				websocket.FormatCloseMessage(websocket.CloseTryAgainLater, err.Error()))
 			conn.Close()
+			close(client.send)
 			return
 		}
 
@@ -319,12 +320,15 @@ func handleWebSocket(hub *Hub, upgrader websocket.Upgrader) http.HandlerFunc {
 
 // getLastPlayedTrack fetches the most recent track from Last.fm.
 func (h *Hub) getLastPlayedTrack(username string) (*Message, error) {
-	url := fmt.Sprintf(
-		"http://ws.audioscrobbler.com/2.0/?method=user.getrecenttracks&user=%s&limit=1&api_key=%s&format=json",
-		username, h.apiKey,
-	)
+	params := url.Values{}
+	params.Set("method", "user.getrecenttracks")
+	params.Set("user", username)
+	params.Set("limit", "1")
+	params.Set("api_key", h.apiKey)
+	params.Set("format", "json")
+	reqURL := "http://ws.audioscrobbler.com/2.0/?" + params.Encode()
 
-	resp, err := h.httpClient.Get(url)
+	resp, err := h.httpClient.Get(reqURL)
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +344,8 @@ func (h *Hub) getLastPlayedTrack(username string) (*Message, error) {
 		return nil, fmt.Errorf("Last.fm API returned status %d for user %s: %s", resp.StatusCode, username, errText)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	const maxResponseBytes = 1 << 20 // 1 MiB
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -402,11 +407,20 @@ func main() {
 	if port == "" {
 		port = "3621"
 	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		log.Fatalf("Invalid PORT value %q: must be an integer between 1 and 65535", port)
+	}
 
 	maxPollers := defaultMaxPollers
 	if v := os.Getenv("MAX_POLLERS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			maxPollers = n
+		if n, err := strconv.Atoi(v); err == nil {
+			if n > 0 {
+				maxPollers = n
+			} else {
+				log.Printf("Invalid MAX_POLLERS value %q: must be greater than 0; using default %d", v, defaultMaxPollers)
+			}
+		} else {
+			log.Printf("Invalid MAX_POLLERS value %q: not a valid integer; using default %d", v, defaultMaxPollers)
 		}
 	}
 

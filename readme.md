@@ -1,14 +1,57 @@
-# LastFM to Websocket
+# LastFM to WebSocket
 
-> A module that can be used to get a user's [LastFM](https://last.fm) recent song(s) along with other data and send it over a websocket connection. This can be useful for realtime status updates on a website, or OBS overlays for streaming.
+> A service that streams a user's [Last.fm](https://last.fm) currently-playing (or most recently scrobbled) track over a WebSocket connection. Useful for real-time status widgets on websites, OBS overlays, or any place you want live music data.
 
+## Features
 
-### Requesting data
+- **Shared polling** – multiple WebSocket clients watching the same Last.fm username share a single API poller, keeping API usage proportional to unique usernames rather than total connections.
+- **Ping/pong keep-alive** – dead connections are detected and cleaned up automatically.
+- **Graceful shutdown** – the server finishes in-flight connections before exiting.
+- **Built-in demo page** – visit `http://localhost:3621/` for an interactive example.
+
+## Quick Start
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `LASTFM_API_KEY` | **yes** | – | Your [Last.fm API key](https://www.last.fm/api/account/create) |
+| `PORT` | no | `3621` | HTTP listen port |
+
+### Run Locally
+
+```bash
+export LASTFM_API_KEY=your_key_here
+go run main.go
+```
+
+Open `http://localhost:3621/` in a browser to see the demo, or connect a WebSocket client to:
+
 ```
 ws://localhost:3621/fm/USERNAME
 ```
 
-### Example JSON response
+### Docker
+
+```bash
+docker build -t lastfm-websocket .
+docker run -p 3621:3621 -e LASTFM_API_KEY=your_key_here lastfm-websocket
+```
+
+Or use Docker Compose – see `docker-compose.yml.example`.
+
+## WebSocket API
+
+### Connecting
+
+```
+ws://your-server:3621/fm/USERNAME
+```
+
+Replace `USERNAME` with any Last.fm username. The server sends a JSON message each time the track changes.
+
+### Example JSON Response
+
 ```json
 {
   "artist": "Grant",
@@ -19,10 +62,39 @@ ws://localhost:3621/fm/USERNAME
 }
 ```
 
-The response will default to return the current played song or the most last played song if the user is not currently playing anything. This will be indicated by the `is_now_playing` field defaulting to true if the user is currently playing something.
+`is_now_playing` is `true` when the user is actively listening; `false` means this is the most recently scrobbled track.
 
-> #### This solution polls LastFM every 2 seconds for an update. LastFM isnt exactly specific on their hard [rate limits](https://www.last.fm/api/intro) but it _should_ be fine for personal use.
+## Web Example
 
-## Running
-### Docker
-It is possible to run an instance using Docker. I _highly_ recommend using Docker compose. Check the example config and customize it to your needs.
+A standalone HTML example is available in [`examples/index.html`](examples/index.html). Open it in a browser, enter a Last.fm username, and it will connect to the WebSocket server and display the current track with album art.
+
+The same example is also served automatically at `http://localhost:3621/` when the server is running.
+
+### Embedding in Your Own Page
+
+```html
+<div id="now-playing"></div>
+<script>
+  var ws = new WebSocket("ws://localhost:3621/fm/YOUR_USERNAME");
+  ws.onmessage = function (event) {
+    var track = JSON.parse(event.data);
+    document.getElementById("now-playing").innerHTML =
+      '<img src="' + track.image_url + '" width="100">' +
+      '<p><strong>' + track.track + '</strong> by ' + track.artist + '</p>';
+  };
+</script>
+```
+
+## Architecture
+
+```
+Hub
+├── UserPoller("alice")  ← polls Last.fm every 5 s
+│   ├── WebSocket Client 1
+│   └── WebSocket Client 2
+└── UserPoller("bob")    ← polls Last.fm every 5 s
+    ├── WebSocket Client 3
+    └── WebSocket Client 4
+```
+
+Each unique Last.fm username has **one** poller goroutine. When the last client disconnects, the poller is stopped. This keeps API usage low even with many concurrent connections.

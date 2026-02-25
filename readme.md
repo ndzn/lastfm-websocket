@@ -1,13 +1,15 @@
 # LastFM to WebSocket
 
-> A service that streams a user's [Last.fm](https://last.fm) currently-playing (or most recently scrobbled) track over a WebSocket connection. Useful for real-time status widgets on websites, OBS overlays, or any place you want live music data.
+> A headless service that streams a user's [Last.fm](https://last.fm) currently-playing (or most recently scrobbled) track over a WebSocket connection. Designed to run on a server without human intervention — no UI, just an API.
 
 ## Features
 
 - **Shared polling** – multiple WebSocket clients watching the same Last.fm username share a single API poller, keeping API usage proportional to unique usernames rather than total connections.
 - **Ping/pong keep-alive** – dead connections are detected and cleaned up automatically.
-- **Graceful shutdown** – the server finishes in-flight connections before exiting.
-- **Built-in demo page** – visit `http://localhost:3621/` for an interactive example.
+- **Graceful shutdown** – the server finishes in-flight connections before exiting on `SIGINT`/`SIGTERM`.
+- **Origin checking** – configurable `ALLOWED_ORIGINS` to prevent cross-site WebSocket hijacking.
+- **Poller limits** – configurable `MAX_POLLERS` to cap the number of unique usernames being monitored.
+- **Input validation** – usernames are validated against Last.fm's format before any API calls are made.
 
 ## Quick Start
 
@@ -17,6 +19,8 @@
 |---|---|---|---|
 | `LASTFM_API_KEY` | **yes** | – | Your [Last.fm API key](https://www.last.fm/api/account/create) |
 | `PORT` | no | `3621` | HTTP listen port |
+| `ALLOWED_ORIGINS` | no | *(allow all)* | Comma-separated list of allowed WebSocket origins (e.g. `https://example.com,https://other.com`). Leave empty to allow all origins. |
+| `MAX_POLLERS` | no | `1000` | Maximum number of unique usernames that can be monitored simultaneously |
 
 ### Run Locally
 
@@ -25,7 +29,7 @@ export LASTFM_API_KEY=your_key_here
 go run main.go
 ```
 
-Open `http://localhost:3621/` in a browser to see the demo, or connect a WebSocket client to:
+Connect a WebSocket client to:
 
 ```
 ws://localhost:3621/fm/USERNAME
@@ -48,7 +52,7 @@ Or use Docker Compose – see `docker-compose.yml.example`.
 ws://your-server:3621/fm/USERNAME
 ```
 
-Replace `USERNAME` with any Last.fm username. The server sends a JSON message each time the track changes.
+Replace `USERNAME` with any Last.fm username (alphanumeric, hyphens, underscores, max 15 characters). The server sends a JSON message each time the track changes.
 
 ### Example JSON Response
 
@@ -64,18 +68,12 @@ Replace `USERNAME` with any Last.fm username. The server sends a JSON message ea
 
 `is_now_playing` is `true` when the user is actively listening; `false` means this is the most recently scrobbled track.
 
-## Web Example
-
-A standalone HTML example is available in [`examples/index.html`](examples/index.html). Open it in a browser, enter a Last.fm username, and it will connect to the WebSocket server and display the current track with album art.
-
-The same example is also served automatically at `http://localhost:3621/` when the server is running.
-
 ### Embedding in Your Own Page
 
 ```html
 <div id="now-playing"></div>
 <script>
-  var ws = new WebSocket("ws://localhost:3621/fm/YOUR_USERNAME");
+  var ws = new WebSocket("ws://your-server:3621/fm/YOUR_USERNAME");
   ws.onmessage = function (event) {
     var track = JSON.parse(event.data);
     document.getElementById("now-playing").innerHTML =
@@ -88,7 +86,7 @@ The same example is also served automatically at `http://localhost:3621/` when t
 ## Architecture
 
 ```
-Hub
+Hub (max 1000 pollers by default)
 ├── UserPoller("alice")  ← polls Last.fm every 5 s
 │   ├── WebSocket Client 1
 │   └── WebSocket Client 2

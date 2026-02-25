@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -22,9 +24,12 @@ const (
 	pongWait   = 60 * time.Second
 	pingPeriod = (pongWait * 9) / 10
 
-	maxMessageSize = 512
-	pollInterval   = 5 * time.Second
+	maxMessageSize    = 512
+	pollInterval      = 5 * time.Second
+	defaultMaxPollers = 1000
 )
+
+var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,15}$`)
 
 // Message is the WebSocket message structure sent to clients.
 type Message struct {
@@ -50,6 +55,7 @@ type Client struct {
 type Hub struct {
 	mu         sync.Mutex
 	pollers    map[string]*UserPoller
+	maxPollers int
 	apiKey     string
 	httpClient *http.Client
 }
@@ -59,28 +65,32 @@ type Hub struct {
 type UserPoller struct {
 	username    string
 	hub         *Hub
-	mu          sync.RWMutex
+	mu          sync.Mutex
 	clients     map[*Client]bool
 	cancel      context.CancelFunc
 	lastMessage []byte
 }
 
-func newHub(apiKey string) *Hub {
+func newHub(apiKey string, maxPollers int) *Hub {
 	return &Hub{
-		pollers: make(map[string]*UserPoller),
-		apiKey:  apiKey,
+		pollers:    make(map[string]*UserPoller),
+		maxPollers: maxPollers,
+		apiKey:     apiKey,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 	}
 }
 
-func (h *Hub) subscribe(client *Client) {
+func (h *Hub) subscribe(client *Client) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	poller, exists := h.pollers[client.username]
 	if !exists {
+		if len(h.pollers) >= h.maxPollers {
+			return fmt.Errorf("maximum number of monitored users reached")
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		poller = &UserPoller{
 			username: client.username,
@@ -101,6 +111,8 @@ func (h *Hub) subscribe(client *Client) {
 		}
 	}
 	poller.mu.Unlock()
+
+	return nil
 }
 
 func (h *Hub) unsubscribe(client *Client) {
@@ -115,14 +127,13 @@ func (h *Hub) unsubscribe(client *Client) {
 	poller.mu.Lock()
 	delete(poller.clients, client)
 	remaining := len(poller.clients)
-	poller.mu.Unlock()
-
-	close(client.send)
-
 	if remaining == 0 {
 		poller.cancel()
 		delete(h.pollers, client.username)
 	}
+	poller.mu.Unlock()
+
+	close(client.send)
 }
 
 func (p *UserPoller) run(ctx context.Context) {
@@ -169,8 +180,8 @@ func (p *UserPoller) poll(lastTrack *Message) {
 }
 
 func (p *UserPoller) broadcast(message []byte) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 
 	p.lastMessage = message
 	for client := range p.clients {
@@ -234,17 +245,49 @@ func (c *Client) writePump() {
 	}
 }
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin:     func(r *http.Request) bool { return true },
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+func newUpgrader(allowedOrigins string) websocket.Upgrader {
+	origins := parseAllowedOrigins(allowedOrigins)
+	return websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			if len(origins) == 0 {
+				return true
+			}
+			origin := r.Header.Get("Origin")
+			for _, allowed := range origins {
+				if allowed == "*" || strings.EqualFold(origin, allowed) {
+					return true
+				}
+			}
+			return false
+		},
+	}
 }
 
-func handleWebSocket(hub *Hub) http.HandlerFunc {
+func parseAllowedOrigins(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var origins []string
+	for _, o := range strings.Split(s, ",") {
+		o = strings.TrimSpace(o)
+		if o != "" {
+			origins = append(origins, o)
+		}
+	}
+	return origins
+}
+
+func handleWebSocket(hub *Hub, upgrader websocket.Upgrader) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		username := strings.TrimPrefix(r.URL.Path, "/fm/")
 		if len(username) == 0 {
 			http.Error(w, "Username not provided", http.StatusBadRequest)
+			return
+		}
+		if !usernameRe.MatchString(username) {
+			http.Error(w, "Invalid username", http.StatusBadRequest)
 			return
 		}
 
@@ -261,7 +304,13 @@ func handleWebSocket(hub *Hub) http.HandlerFunc {
 			send:     make(chan []byte, 16),
 		}
 
-		hub.subscribe(client)
+		if err := hub.subscribe(client); err != nil {
+			log.Printf("Subscribe error for %s: %v", username, err)
+			conn.WriteMessage(websocket.CloseMessage,
+				websocket.FormatCloseMessage(websocket.CloseTryAgainLater, err.Error()))
+			conn.Close()
+			return
+		}
 
 		go client.writePump()
 		client.readPump()
@@ -282,8 +331,13 @@ func (h *Hub) getLastPlayedTrack(username string) (*Message, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
-		return nil, fmt.Errorf("Last.fm API returned status %d for user %s", resp.StatusCode, username)
+		const maxErrorBodyBytes = 1024
+		bodySnippet, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		errText := strings.TrimSpace(string(bodySnippet))
+		if errText == "" {
+			errText = "<empty>"
+		}
+		return nil, fmt.Errorf("Last.fm API returned status %d for user %s: %s", resp.StatusCode, username, errText)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -349,18 +403,24 @@ func main() {
 		port = "3621"
 	}
 
-	hub := newHub(apiKey)
+	maxPollers := defaultMaxPollers
+	if v := os.Getenv("MAX_POLLERS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			maxPollers = n
+		}
+	}
+
+	hub := newHub(apiKey, maxPollers)
+	upgrader := newUpgrader(os.Getenv("ALLOWED_ORIGINS"))
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/fm/", handleWebSocket(hub))
-	mux.HandleFunc("/", serveExample)
+	mux.HandleFunc("/fm/", handleWebSocket(hub, upgrader))
 
 	srv := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:        ":" + port,
+		Handler:     mux,
+		ReadTimeout: 15 * time.Second,
+		IdleTimeout: 60 * time.Second,
 	}
 
 	go func() {
@@ -383,124 +443,3 @@ func main() {
 	}
 	log.Println("Server stopped")
 }
-
-func serveExample(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, exampleHTML)
-}
-
-const exampleHTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Last.fm Now Playing</title>
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #121212; color: #fff;
-    display: flex; justify-content: center; align-items: center;
-    min-height: 100vh;
-  }
-  .container { text-align: center; max-width: 420px; width: 100%; padding: 20px; }
-  h1 { font-size: 1.2rem; color: #b3b3b3; margin-bottom: 24px; }
-  #connect-form { margin-bottom: 24px; display: flex; gap: 8px; justify-content: center; }
-  #connect-form input {
-    padding: 10px 14px; border-radius: 8px; border: 1px solid #333;
-    background: #1e1e1e; color: #fff; font-size: 1rem; width: 200px;
-  }
-  #connect-form button {
-    padding: 10px 18px; border-radius: 8px; border: none;
-    background: #1db954; color: #fff; font-size: 1rem; cursor: pointer;
-    font-weight: 600;
-  }
-  #connect-form button:hover { background: #1ed760; }
-  .player { display: none; margin-top: 12px; }
-  .player.active { display: block; }
-  .album-art {
-    width: 200px; height: 200px; border-radius: 12px;
-    margin: 0 auto 16px; background: #282828;
-    overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,.5);
-  }
-  .album-art img { width: 100%; height: 100%; object-fit: cover; }
-  .track-name { font-size: 1.3rem; font-weight: 700; margin-bottom: 4px; }
-  .track-name a { color: #fff; text-decoration: none; }
-  .track-name a:hover { text-decoration: underline; }
-  .artist-name { font-size: 1rem; color: #b3b3b3; }
-  .badge {
-    display: inline-block; margin-top: 12px; padding: 4px 12px;
-    border-radius: 12px; font-size: .75rem; font-weight: 600;
-  }
-  .badge.playing { background: #1db954; color: #fff; }
-  .badge.scrobbled { background: #333; color: #b3b3b3; }
-  .status { margin-top: 16px; font-size: .8rem; color: #666; }
-</style>
-</head>
-<body>
-<div class="container">
-  <h1>Last.fm Now Playing</h1>
-  <form id="connect-form">
-    <input type="text" id="username" placeholder="Last.fm username" required>
-    <button type="submit">Connect</button>
-  </form>
-  <div class="player" id="player">
-    <div class="album-art"><img id="art" src="" alt="Album Art"></div>
-    <div class="track-name"><a id="track" href="#" target="_blank"></a></div>
-    <div class="artist-name" id="artist"></div>
-    <span class="badge" id="badge"></span>
-  </div>
-  <div class="status" id="status"></div>
-</div>
-<script>
-(function () {
-  var ws, reconnectTimer, username;
-  var form = document.getElementById("connect-form");
-  var status = document.getElementById("status");
-  var player = document.getElementById("player");
-
-  form.addEventListener("submit", function (e) {
-    e.preventDefault();
-    username = document.getElementById("username").value.trim();
-    if (!username) return;
-    connect();
-  });
-
-  function connect() {
-    if (ws) { ws.onclose = null; ws.close(); }
-    var proto = location.protocol === "https:" ? "wss:" : "ws:";
-    var url = proto + "//" + location.host + "/fm/" + encodeURIComponent(username);
-    status.textContent = "Connecting…";
-    ws = new WebSocket(url);
-
-    ws.onopen = function () { status.textContent = "Connected"; };
-
-    ws.onmessage = function (evt) {
-      try {
-        var d = JSON.parse(evt.data);
-        document.getElementById("art").src = d.image_url || "";
-        document.getElementById("track").textContent = d.track;
-        document.getElementById("track").href = d.track_url || "#";
-        document.getElementById("artist").textContent = d.artist;
-        var badge = document.getElementById("badge");
-        badge.textContent = d.is_now_playing ? "Now Playing" : "Last Played";
-        badge.className = "badge " + (d.is_now_playing ? "playing" : "scrobbled");
-        player.classList.add("active");
-      } catch (e) { console.error("Parse error", e); }
-    };
-
-    ws.onclose = function () {
-      status.textContent = "Disconnected – reconnecting in 3s…";
-      reconnectTimer = setTimeout(connect, 3000);
-    };
-
-    ws.onerror = function () { ws.close(); };
-  }
-})();
-</script>
-</body>
-</html>`

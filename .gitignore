@@ -24,4 +24,7 @@
 # Go workspace file
 go.work
 
+# Build binary
+lastfm-websocket
+
 # End of https://www.toptal.com/developers/gitignore/api/go

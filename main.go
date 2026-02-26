@@ -396,7 +396,11 @@ func (h *Hub) getLastPlayedTrack(username string) (*Message, error) {
 
 	var dateUTS int64
 	if track.Date.UTS != "" {
-		dateUTS, _ = strconv.ParseInt(track.Date.UTS, 10, 64)
+		if parsed, err := strconv.ParseInt(track.Date.UTS, 10, 64); err != nil {
+			log.Printf("Failed to parse date UTS %q for user %s: %v", track.Date.UTS, username, err)
+		} else {
+			dateUTS = parsed
+		}
 	}
 
 	return &Message{

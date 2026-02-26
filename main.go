@@ -39,6 +39,8 @@ type Message struct {
 	ImageURL     string `json:"image_url"`
 	TrackURL     string `json:"track_url"`
 	IsNowPlaying bool   `json:"is_now_playing"`
+	DateUTS      int64  `json:"date_uts"`
+	DateText     string `json:"date_text"`
 }
 
 // Client represents a single WebSocket connection.
@@ -362,6 +364,10 @@ func (h *Hub) getLastPlayedTrack(username string) (*Message, error) {
 					Size string `json:"size"`
 				} `json:"image"`
 				URL  string `json:"url"`
+				Date struct {
+					UTS  string `json:"uts"`
+					Text string `json:"#text"`
+				} `json:"date"`
 				Attr struct {
 					NowPlaying string `json:"nowplaying"`
 				} `json:"@attr"`
@@ -388,12 +394,19 @@ func (h *Hub) getLastPlayedTrack(username string) (*Message, error) {
 		}
 	}
 
+	var dateUTS int64
+	if track.Date.UTS != "" {
+		dateUTS, _ = strconv.ParseInt(track.Date.UTS, 10, 64)
+	}
+
 	return &Message{
 		Artist:       track.Artist.Name,
 		Track:        track.Name,
 		ImageURL:     imageURL,
 		TrackURL:     track.URL,
 		IsNowPlaying: isNowPlaying,
+		DateUTS:      dateUTS,
+		DateText:     track.Date.Text,
 	}, nil
 }
 

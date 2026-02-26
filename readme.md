@@ -71,11 +71,15 @@ Replace `USERNAME` with any Last.fm username (alphanumeric, hyphens, underscores
   "track": "Wishes",
   "image_url": "https://lastfm.freetls.fastly.net/i/u/174s/5bb0cf2d5c308fb4df40e6aab7514d4d.jpg",
   "track_url": "https://www.last.fm/music/Grant/_/Wishes",
-  "is_now_playing": true
+  "is_now_playing": true,
+  "date_uts": 0,
+  "date_text": ""
 }
 ```
 
 `is_now_playing` is `true` when the user is actively listening; `false` means this is the most recently scrobbled track.
+
+`date_uts` is the Unix timestamp of when the track was scrobbled and `date_text` is the human-readable date string from the Last.fm API (e.g. `"01 Jan 2025, 12:00"`). When `is_now_playing` is `true`, these fields will be `0` and `""` respectively since the track hasn't been scrobbled yet.
 
 ### Embedding in Your Own Page
 

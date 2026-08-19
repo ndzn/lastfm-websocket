@@ -25,22 +25,93 @@ const (
 	pongWait   = 60 * time.Second
 	pingPeriod = (pongWait * 9) / 10
 
-	maxMessageSize    = 512
-	pollInterval      = 5 * time.Second
-	defaultMaxPollers = 1000
+	maxMessageSize     = 512
+	pollInterval       = 5 * time.Second
+	defaultMaxPollers  = 1000
+	trackEventType     = "track"
+	heartbeatEventType = "heartbeat"
+
+	// Protocol pings above are invisible to browser clients. A data frame lets
+	// browser code distinguish an idle user from a silently dead connection.
+	heartbeatPeriod = 20 * time.Second
 )
 
 var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,15}$`)
 
-// Message is the WebSocket message structure sent to clients.
-type Message struct {
+// heartbeatFrame is an application-level liveness event for browser clients.
+var heartbeatFrame = []byte(`{"type":"` + heartbeatEventType + `"}`)
+
+// TrackPayload is the Last.fm track data carried by a track event.
+type TrackPayload struct {
 	Artist       string `json:"artist"`
+	ArtistMBID   string `json:"artist_mbid"`
+	ArtistURL    string `json:"artist_url"`
 	Track        string `json:"track"`
+	TrackMBID    string `json:"track_mbid"`
+	Album        string `json:"album"`
+	AlbumMBID    string `json:"album_mbid"`
 	ImageURL     string `json:"image_url"`
 	TrackURL     string `json:"track_url"`
 	IsNowPlaying bool   `json:"is_now_playing"`
 	DateUTS      int64  `json:"date_uts"`
 	DateText     string `json:"date_text"`
+	Loved        bool   `json:"loved"`
+	ScrobbledAt  string `json:"scrobbled_at,omitempty"`
+}
+
+type recentTracksResponse struct {
+	RecentTracks struct {
+		Tracks []lastFMTrack `json:"track"`
+	} `json:"recenttracks"`
+}
+
+type lastFMTrack struct {
+	Artist lastFMArtist `json:"artist"`
+	Name   string       `json:"name"`
+	MBID   string       `json:"mbid"`
+	Album  struct {
+		Name string `json:"#text"`
+		MBID string `json:"mbid"`
+	} `json:"album"`
+	Images []struct {
+		URL  string `json:"#text"`
+		Size string `json:"size"`
+	} `json:"image"`
+	URL   string `json:"url"`
+	Loved string `json:"loved"`
+	Date  struct {
+		UTS  string `json:"uts"`
+		Text string `json:"#text"`
+	} `json:"date"`
+	Attr struct {
+		NowPlaying string `json:"nowplaying"`
+	} `json:"@attr"`
+}
+
+// lastFMArtist supports the compact #text shape and the object returned when
+// user.getRecentTracks is requested with extended=1.
+type lastFMArtist struct {
+	Name string `json:"name"`
+	Text string `json:"#text"`
+	MBID string `json:"mbid"`
+	URL  string `json:"url"`
+}
+
+func (a lastFMArtist) displayName() string {
+	if name := strings.TrimSpace(a.Name); name != "" {
+		return name
+	}
+	return a.Text
+}
+
+// trackEvent is the typed WebSocket event sent when a user's track changes.
+type trackEvent struct {
+	Type string       `json:"type"`
+	Data TrackPayload `json:"data"`
+}
+
+func marshalTrackEvent(track TrackPayload) ([]byte, error) {
+	return json.Marshal(trackEvent{Type: trackEventType, Data: track})
 }
 
 // Client represents a single WebSocket connection.
@@ -144,7 +215,7 @@ func (p *UserPoller) run(ctx context.Context) {
 	log.Printf("Poller started for user: %s", p.username)
 	defer log.Printf("Poller stopped for user: %s", p.username)
 
-	var lastTrack Message
+	var lastTrack TrackPayload
 
 	p.poll(&lastTrack)
 
@@ -161,7 +232,7 @@ func (p *UserPoller) run(ctx context.Context) {
 	}
 }
 
-func (p *UserPoller) poll(lastTrack *Message) {
+func (p *UserPoller) poll(lastTrack *TrackPayload) {
 	track, err := p.hub.getLastPlayedTrack(p.username)
 	if err != nil {
 		log.Printf("Error polling Last.fm for %s: %v", p.username, err)
@@ -174,9 +245,9 @@ func (p *UserPoller) poll(lastTrack *Message) {
 
 	if *track != *lastTrack {
 		*lastTrack = *track
-		data, err := json.Marshal(track)
+		data, err := marshalTrackEvent(*track)
 		if err != nil {
-			log.Printf("Error marshaling track data: %v", err)
+			log.Printf("Error marshaling track event: %v", err)
 			return
 		}
 		p.broadcast(data)
@@ -221,10 +292,15 @@ func (c *Client) readPump() {
 	}
 }
 
-// writePump sends messages from the send channel and periodic pings.
+// writePump sends messages from the send channel, periodic pings, and periodic
+// heartbeat frames. It is the only goroutine writing to the connection.
 func (c *Client) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer ticker.Stop()
+	defer c.conn.Close()
+
+	heartbeat := time.NewTicker(heartbeatPeriod)
+	defer heartbeat.Stop()
 
 	for {
 		select {
@@ -235,6 +311,11 @@ func (c *Client) writePump() {
 				return
 			}
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				return
+			}
+		case <-heartbeat.C:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.TextMessage, heartbeatFrame); err != nil {
 				return
 			}
 		case <-ticker.C:
@@ -321,11 +402,12 @@ func handleWebSocket(hub *Hub, upgrader websocket.Upgrader) http.HandlerFunc {
 }
 
 // getLastPlayedTrack fetches the most recent track from Last.fm.
-func (h *Hub) getLastPlayedTrack(username string) (*Message, error) {
+func (h *Hub) getLastPlayedTrack(username string) (*TrackPayload, error) {
 	params := url.Values{}
 	params.Set("method", "user.getrecenttracks")
 	params.Set("user", username)
 	params.Set("limit", "1")
+	params.Set("extended", "1")
 	params.Set("api_key", h.apiKey)
 	params.Set("format", "json")
 	reqURL := "http://ws.audioscrobbler.com/2.0/?" + params.Encode()
@@ -352,69 +434,57 @@ func (h *Hub) getLastPlayedTrack(username string) (*Message, error) {
 		return nil, err
 	}
 
-	var data struct {
-		RecentTracks struct {
-			Track []struct {
-				Artist struct {
-					Name string `json:"#text"`
-				} `json:"artist"`
-				Name  string `json:"name"`
-				Image []struct {
-					URL  string `json:"#text"`
-					Size string `json:"size"`
-				} `json:"image"`
-				URL  string `json:"url"`
-				Date struct {
-					UTS  string `json:"uts"`
-					Text string `json:"#text"`
-				} `json:"date"`
-				Attr struct {
-					NowPlaying string `json:"nowplaying"`
-				} `json:"@attr"`
-			} `json:"track"`
-		} `json:"recenttracks"`
-	}
+	var data recentTracksResponse
 
 	if err := json.Unmarshal(body, &data); err != nil {
 		return nil, fmt.Errorf("failed to parse Last.fm response for user %s: %w", username, err)
 	}
 
-	if len(data.RecentTracks.Track) == 0 {
+	if len(data.RecentTracks.Tracks) == 0 {
 		return nil, nil
 	}
 
-	track := data.RecentTracks.Track[0]
-	isNowPlaying := strings.TrimSpace(track.Attr.NowPlaying) == "true"
+	track := data.RecentTracks.Tracks[0]
+	isNowPlaying := strings.EqualFold(strings.TrimSpace(track.Attr.NowPlaying), "true")
+	var dateUTS int64
+	var dateText string
+	var scrobbledAt string
+	if !isNowPlaying {
+		rawDateUTS := strings.TrimSpace(track.Date.UTS)
+		if rawDateUTS != "" {
+			parsed, parseErr := strconv.ParseInt(rawDateUTS, 10, 64)
+			if parseErr != nil {
+				log.Printf("Failed to parse date UTS %q for user %s: %v", track.Date.UTS, username, parseErr)
+			} else {
+				dateUTS = parsed
+				dateText = track.Date.Text
+				scrobbledAt = time.Unix(parsed, 0).UTC().Format(time.RFC3339)
+			}
+		}
+	}
 	var imageURL string
 
-	for _, image := range track.Image {
+	for _, image := range track.Images {
 		if image.Size == "large" {
 			imageURL = image.URL
 			break
 		}
 	}
-
-	var dateUTS int64
-	var dateText string
-	if !isNowPlaying {
-		if track.Date.UTS != "" {
-			if parsed, err := strconv.ParseInt(track.Date.UTS, 10, 64); err != nil {
-				log.Printf("Failed to parse date UTS %q for user %s: %v", track.Date.UTS, username, err)
-			} else {
-				dateUTS = parsed
-				dateText = track.Date.Text
-			}
-		}
-	}
-
-	return &Message{
-		Artist:       track.Artist.Name,
+	return &TrackPayload{
+		Artist:       track.Artist.displayName(),
+		ArtistMBID:   track.Artist.MBID,
+		ArtistURL:    track.Artist.URL,
 		Track:        track.Name,
+		TrackMBID:    track.MBID,
+		Album:        track.Album.Name,
+		AlbumMBID:    track.Album.MBID,
 		ImageURL:     imageURL,
 		TrackURL:     track.URL,
 		IsNowPlaying: isNowPlaying,
 		DateUTS:      dateUTS,
 		DateText:     dateText,
+		Loved:        strings.TrimSpace(track.Loved) == "1",
+		ScrobbledAt:  scrobbledAt,
 	}, nil
 }
 

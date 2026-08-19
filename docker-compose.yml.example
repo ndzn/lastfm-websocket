@@ -1,14 +1,12 @@
-version: "3.5"
-
 services:
-    fm:
-        image: ghcr.io/ndzn/lastfm-websocket:main
-        # To build locally instead, comment out `image` and uncomment `build`:
-        # build: .
-        restart: unless-stopped
-        # container_name: fm
-        ports:
-            - "3621:3621"
-        environment:
-            - LASTFM_API_KEY=your_lastfm_api_key_here
-            - PORT=3621
+  fm:
+    image: ghcr.io/ndzn/lastfm-websocket:main
+    # To build locally instead, comment out `image` and uncomment `build`:
+    # build: .
+    restart: unless-stopped
+    # container_name: fm
+    ports:
+      - "3621:3621"
+    environment:
+      LASTFM_API_KEY: your_lastfm_api_key_here
+      PORT: "3621"
